@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
-	"log"
-	"os"
-
 	"github.com/dgraph-io/dgo/v210"
 	"github.com/dgraph-io/dgo/v210/protos/api"
 	"google.golang.org/grpc"
+	"log"
+	"os"
 )
 
 // Define the node type
@@ -32,22 +32,67 @@ func main() {
 	// Create a new Dgraph client
 	client := dgo.NewDgraphClient(api.NewDgraphClient(conn))
 
-	// Define the query
-	query := `
-        {
-            nodes(func: type(Combo)) {
-                uid
-                A
+	// Define pagination parameters
+	first := 1000 // Number of nodes to fetch per page
+	offset := 0   // Initial offset
+
+	// Create a new CSV file
+	file, err := os.Create("export.csv")
+	if err != nil {
+		log.Fatalf("Failed to create file: %v", err)
+	}
+	defer file.Close()
+
+	// Create a CSV writer
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// Write CSV header
+	if err := writer.Write([]string{"A", "B", "ComboResult"}); err != nil {
+		log.Fatalf("Failed to write CSV header: %v", err)
+	}
+
+	for {
+		// Fetch nodes in batches
+		nodes, err := fetchNodes(client, first, offset)
+		if err != nil {
+			log.Fatalf("Failed to fetch nodes: %v", err)
+		}
+
+		if len(nodes) == 0 {
+			break
+		}
+
+		// Export nodes to CSV
+		for _, node := range nodes {
+			if err := writer.Write([]string{node.A, node.B, node.ComboResult}); err != nil {
+				log.Fatalf("Failed to write CSV data: %v", err)
+			}
+		}
+
+		offset += first
+	}
+
+	fmt.Println("Data exported to export.csv")
+}
+
+func fetchNodes(client *dgo.Dgraph, first, offset int) ([]NodeType, error) {
+	// Define the query with pagination
+	query := fmt.Sprintf(`
+		{
+			nodes(func: type(Combo), first: %d, offset: %d) {
+				uid
+				A
 				B
 				ComboResult
-            }
-        }
-    `
+			}
+		}
+	`, first, offset)
 
 	// Run the query
-	resp, err := client.NewReadOnlyTxn().Query(context.Background(), query)
+	resp, err := client.NewTxn().Query(context.Background(), query)
 	if err != nil {
-		log.Fatalf("Failed to execute query: %v", err)
+		return nil, fmt.Errorf("failed to execute query: %v", err)
 	}
 
 	// Unmarshal the response
@@ -55,26 +100,8 @@ func main() {
 		Nodes []NodeType `json:"nodes"`
 	}
 	if err := json.Unmarshal(resp.GetJson(), &data); err != nil {
-		log.Fatalf("Failed to unmarshal JSON: %v", err)
+		return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
 	}
 
-	// Export the data to JSON
-	jsonData, err := json.MarshalIndent(data.Nodes, "", "  ")
-	if err != nil {
-		log.Fatalf("Failed to marshal JSON: %v", err)
-	}
-
-	// Save JSON data to a file
-	file, err := os.Create("export.json")
-	if err != nil {
-		log.Fatalf("Failed to create file: %v", err)
-	}
-	defer file.Close()
-
-	_, err = file.Write(jsonData)
-	if err != nil {
-		log.Fatalf("Failed to write to file: %v", err)
-	}
-
-	fmt.Println("Data exported to export.json")
+	return data.Nodes, nil
 }
